@@ -7,6 +7,7 @@ from src.models.source import Source
 from src.models.record import Record
 from src.models.run import Run
 from src.models import note,audit
+from src.models.monitor import MonitorPlan
 from src.utils.security import hash_password
 from src.utils.serialization import now
 from src.services.runs import queue
@@ -32,6 +33,31 @@ def seed_values(kind,index,batch,rng):
 
 def counts(db):
     return {cls.__tablename__:db.scalar(select(func.count()).select_from(cls)) for cls in (User,Source,Record,Run)}
+def seed_monitor(db):
+    """炉序失准监控演示：1#炉正常核对，2#炉连续失准首次报警且缺号等待，3#炉带更正留痕。"""
+    from src.services import monitor as mon
+    from src.schemas.monitor import PlanInput,ReadingInput,CorrectionInput
+    if db.scalar(select(MonitorPlan.id).where(MonitorPlan.name=='十一月炉序失准监控')):return
+    admin=db.scalar(select(User).where(User.email=='admin@'+CONFIG['slug']+'.demo'))
+    rng=random.Random(20261120);furnaces=[]
+    for fi in range(1,4):
+        predictions=[]
+        for si in range(1,13):
+            moisture=rng.uniform(20,60);thickness=rng.uniform(1,8);temperature=rng.uniform(50,100);airflow=rng.uniform(1,5)
+            minutes=12+1.6*moisture+8*thickness-.45*temperature-3*airflow+0.1*moisture*thickness
+            predictions.append({'piece_id':f'HX-M{fi}-{si:03}','predicted_minutes':round(max(5,minutes),1)})
+        furnaces.append({'name':f'{fi}#炉','predictions':predictions})
+    plan=mon.create_plan(db,admin,PlanInput(name='十一月炉序失准监控',alpha=0.1,threshold_minutes=8.0,furnaces=furnaces))
+    fid={f['name']:f['id'] for f in plan['furnaces']}
+    pred={f['name']:[p['predicted_minutes'] for p in f['predictions']] for f in furnaces}
+    def report(fname,seq,actual):
+        mon.submit_reading(db,admin,plan['id'],ReadingInput(furnace_id=fid[fname],seq=seq,actual_minutes=round(actual,1)))
+    for si in range(1,7):report('1#炉',si,pred['1#炉'][si-1]+rng.uniform(-4,4))
+    for si in range(1,5):report('2#炉',si,pred['2#炉'][si-1]+12)
+    report('2#炉',6,pred['2#炉'][5]+2)
+    actuals3=[pred['3#炉'][si-1]+rng.uniform(-4,4) for si in range(1,6)]
+    for si,a in enumerate(actuals3,1):report('3#炉',si,a)
+    mon.submit_correction(db,admin,plan['id'],CorrectionInput(furnace_id=fid['3#炉'],seq=2,corrected_minutes=round(actuals3[1]+3.7,1),reason='仪表复校后读数更正'))
 def seed():
     Base.metadata.create_all(engine);rng=random.Random(42);queued=[]
     with Session() as db:
@@ -52,6 +78,7 @@ def seed():
             if batch==0 and not db.scalar(select(Run.id).where(Run.name=='首轮种子研究')):
                 records=[{'id':r.id,'source_id':r.source_id,'reference':r.reference,'values':r.values} for r in db.scalars(select(Record).where(Record.source_id==source.id).order_by(Record.id))]
                 run=Run(source_id=source.id,name='首轮种子研究',state='queued',parameters=CONFIG['default_parameters'],snapshot={'source':{'id':source.id,'name':source.name,'filename':source.filename},'records':records},created_at=now());db.add(run);db.flush();queued.append(run.id)
+        seed_monitor(db)
         db.commit();print(json.dumps(counts(db),ensure_ascii=False))
     for id in queued:
         try:queue.rpush('analysis:queue',id)

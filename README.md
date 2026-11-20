@@ -14,6 +14,7 @@ RandomForest回归、训练内特征子集交叉验证与留出集MAE。为槐�
 4. 完整结果：真实算法摘要、专属诊断、全部CSV导出和可恢复失败态。
 5. 工艺试验备忘：分析师草案→负责人批准→阅读者下载批准快照。
 6. 审计：登录、来源修改、任务worker完成、业务说明批准等事件。
+7. 炉序监控：开测定下误报上限与各炉有序试件预测清单，SPRT顺序核对预测失准，乱序补报、更正留痕，页面显示各炉核对到哪件及首次报警试件。
 
 ## 快速启动
 
@@ -57,6 +58,8 @@ DryingStudy / DryingSample / RegressionRun / ProcessMemo 是核心实体；另�
 
 实体贯穿 `backend/src/models`、`schemas`、`services`、`controllers`、`routes`，以及 `frontend/src/api/research.js`、`stores/research.js` 和 `pages`。`Source.key` 与 `(Record.source_id, reference)` 为自然键；来源改名不会修改已冻结任务输入。业务说明在创建时保存结果快照，批准后从该快照导出。
 
+炉序监控新增 `monitor_plans` → `monitor_furnaces` / `monitor_predictions` / `monitor_readings` / `monitor_corrections`。`(furnace_id, seq)` 与 `idempotency_key` 为唯一约束；上报实测时对该炉行加锁（`FOR UPDATE`），并发补报串行计入、不会跳号；计入事务化，中断后从库中状态续跑，重试不重复计入或报警。
+
 ## 算法与口径
 
 RandomForest回归、训练内特征子集交叉验证与留出集MAE，全部计算位于 `backend/src/services/algorithm.py`，前端不拟合模型、不生成模拟结果。输入是冻结业务观察及参数，输出summary、专属诊断、逐行计算明细、seed与输入SHA256。CSV包含全部结果行；页面仅预览前30行。参数：
@@ -70,6 +73,8 @@ RandomForest回归、训练内特征子集交叉验证与留出集MAE，全部�
 
 已知边界：只比较三个预定义特征子集，超参数由分析前固定；留出集不用于选择。置换重要性来自最后留出集，不可反复依据它改模再宣称独立验证。不含预测区间，不用于外推工艺。
 
+炉序失准监控（`backend/src/services/monitor_sprt.py` 纯函数核心 + `monitor.py` 持久化）：实测与预计相差超过给定分钟数记为失准；每炉按清单顺序累乘失准率三成（0.30）对一成（0.10）的似然比——失准乘 3、不失准乘 7/9，内部以对数似然比累加避免溢出——首次达到炉数÷误报上限即报警并锁定，报警后仍继续计入但不重复报警。乱序补报先存 `buffered`，缺号只阻塞该炉；已计入读数的更正写入 `monitor_corrections` 留痕，既有报警仍按当时读数。种子含“十一月炉序失准监控”：1#炉正常、2#炉第4件首次报警且缺第5件、3#炉带更正留痕。SPRT 核心独立 oracle 见 `test-artifacts/gb-0044/`。
+
 ## 演示数据与一天剧本
 
 固定seed=42，3个来源 ` HX-202611-01/02/03`，每来源240条，共720条业务记录；三个账号和首轮种子任务。自然键检查后仅插入缺失数据，连跑seed不重复、不覆盖用户修改。`SEED_DEMO=true` 时启动自动执行；失败记录日志但不阻塞服务。首轮任务同样由独立worker真实计算。
@@ -82,6 +87,7 @@ RandomForest回归、训练内特征子集交叉验证与留出集MAE，全部�
 6. 09:25 分析师查看专属诊断及逐行结果，并下载CSV复算。
 7. 09:30 提交“十一月业务复核意见”，负责人核对并批准。
 8. 09:40 viewer下载批准快照，查看审计中的worker完成与批准事件。
+9. 09:50 打开“炉序监控”：2#炉已在第4件首次报警；补报2#炉第5件使暂存的第6件连续计入；对3#炉已计入序号提交更正，确认留痕且报警不变。
 
 ## 目录与本地开发
 
